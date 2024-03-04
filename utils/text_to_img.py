@@ -1,34 +1,40 @@
-import asyncio
+import base64
+import itertools
+import os
 import pathlib
+import shutil
+import textwrap
 from io import BytesIO
 from io import StringIO
-import os
 from tempfile import NamedTemporaryFile
+from typing import Optional
 
 import aiohttp
-import imgkit
-
-from config import Config
-from PIL import Image, ImageDraw, ImageFont
-import textwrap
-import itertools
 import unicodedata
-from graia.ariadne.message.element import Image as GraiaImage
-from charset_normalizer import from_bytes
-import utils.zipimporter_patch
-# Do not delete this line, it has be loaded before markdown
+import asyncio
+import imgkit
+from pydantic import BaseModel
+from pydantic.dataclasses import dataclass
+
+# Do not delete this line, it has be loaded **BEFORE** markdown
+from utils.zipimporter_patch import patch
+
 import markdown
+import qrcode
+from PIL import Image
+from PIL import ImageDraw, ImageFont
+from charset_normalizer import from_bytes
+from graia.ariadne.message.element import Image as GraiaImage
+from loguru import logger
 from markdown.extensions.codehilite import CodeHiliteExtension
 from markdown.extensions.tables import TableExtension
 from mdx_math import MathExtension
-
 from pygments.formatters import HtmlFormatter
 from pygments.styles.xcode import XcodeStyle
-from loguru import logger
-import shutil
-import qrcode
-import base64
-from PIL import Image
+
+from config import Config
+
+patch()
 
 config = Config.load_config()
 
@@ -46,8 +52,8 @@ with open("./assets/texttoimg/template.html", "rb") as f:
 if config.text_to_image.wkhtmltoimage is None:
     os.environ["PATH"] = os.environ["PATH"] + os.pathsep + os.getcwd()
     config.text_to_image.wkhtmltoimage = shutil.which("wkhtmltoimage")
-    if config.text_to_image.wkhtmltoimage is None:
-        logger.error("未检测到 wkhtmltoimage，无法进行 Markdown 渲染！")
+if config.text_to_image.wkhtmltoimage is None:
+    logger.error("未检测到 wkhtmltoimage，无法进行 Markdown 渲染！")
 
 
 class TextWrapper(textwrap.TextWrapper):
@@ -64,10 +70,9 @@ class TextWrapper(textwrap.TextWrapper):
         """
         Calcaute display length of a line
         """
-        charslen = 0
-        for char in text:
-            charslen += self.char_widths[unicodedata.east_asian_width(char)]
-        return charslen
+        return sum(
+            self.char_widths[unicodedata.east_asian_width(char)] for char in text
+        )
 
     def _wrap_chunks(self, chunks):
         """_wrap_chunks(chunks : [string]) -> [string]
@@ -86,10 +91,7 @@ class TextWrapper(textwrap.TextWrapper):
         if self.width <= 0:
             raise ValueError("invalid width %r (must be > 0)" % self.width)
         if self.max_lines is not None:
-            if self.max_lines > 1:
-                indent = self.subsequent_indent
-            else:
-                indent = self.initial_indent
+            indent = self.subsequent_indent if self.max_lines > 1 else self.initial_indent
             if len(indent) + len(self.placeholder.lstrip()) > self.width:
                 raise ValueError("placeholder too large for max width")
 
@@ -105,11 +107,7 @@ class TextWrapper(textwrap.TextWrapper):
             cur_len = 0
 
             # Figure out which static string will prefix this line.
-            if lines:
-                indent = self.subsequent_indent
-            else:
-                indent = self.initial_indent
-
+            indent = self.subsequent_indent if lines else self.initial_indent
             # Maximum width for this line.
             width = self.width - len(indent)
 
@@ -121,14 +119,11 @@ class TextWrapper(textwrap.TextWrapper):
             while chunks:
                 l = self._strlen(chunks[-1])
 
-                # Can at least squeeze this chunk onto the current line.
-                if cur_len + l <= width:
-                    cur_line.append(chunks.pop())
-                    cur_len += l
-
-                # Nope, this line is full.
-                else:
+                if cur_len + l > width:
                     break
+
+                cur_line.append(chunks.pop())
+                cur_len += l
 
             # The current line is full, and the next chunk is too big to
             # fit on *any* line (not just this one).
@@ -194,11 +189,7 @@ class TextWrapper(textwrap.TextWrapper):
         """
         # Figure out when indent is larger than the specified width, and make
         # sure at least one character is stripped off on every pass
-        if width < 1:
-            space_left = 1
-        else:
-            space_left = width - cur_len
-
+        space_left = 1 if width < 1 else width - cur_len
         # If we're allowed to break long words, then do so: put as much
         # of the next chunk onto the current line as will fit.
         space_left = self._get_space_left(reversed_chunks[-1], space_left)
@@ -234,8 +225,10 @@ def text_to_image_raw(text, width=config.text_to_image.width, font_name=config.t
     lines = text.split('\n')
     line_lengths = [draw.textlength(line, font=font) for line in lines]
     text_width = max(line_lengths)
-    text_height = font.getsize(text)[1]
-    char_width = font.getsize('.')[0]
+    _, top, _, bottom = font.getbbox(text)
+    text_height = bottom - top
+    left, _, right, _ = font.getbbox('.')
+    char_width = right - left
 
     wrapper = TextWrapper(width=int(width / char_width), break_long_words=True)
     wrapped_text = [wrapper.wrap(i) for i in lines if i != '']
@@ -304,7 +297,7 @@ async def get_qr_data(text):
                 resp.raise_for_status()
                 url = await resp.text()
         except Exception as e:
-            url = "上传失败：" + str(e)
+            url = f"上传失败：{str(e)}"
         image = qrcode.make(url)
         buffered = BytesIO()
         image.save(buffered, format="JPEG")
@@ -342,15 +335,19 @@ async def text_to_image(text):
         with StringIO(html) as input_file:
             ok = False
             try:
-                # 调用imgkit将html转为图片
-                ok = await asyncio.get_event_loop().run_in_executor(None, imgkit.from_file, input_file, temp_jpg_filename, {
-                    "enable-local-file-access": "",
-                    "allow": asset_folder,
-                    "width": config.text_to_image.width,  # 图片宽度
-                }, None, None, None, imgkit_config)
-                # 调用PIL将图片读取为 JPEG，RGB 格式
-                image = Image.open(temp_jpg_filename, formats=['PNG']).convert('RGB')
-                ok = True
+                if config.text_to_image.wkhtmltoimage:
+                    # 调用imgkit将html转为图片
+                    ok = await asyncio.get_event_loop().run_in_executor(None, imgkit.from_file, input_file,
+                                                                        temp_jpg_filename, {
+                                                                            "enable-local-file-access": "",
+                                                                            "allow": asset_folder,
+                                                                            "width": config.text_to_image.width,  # 图片宽度
+                                                                        }, None, None, None, imgkit_config)
+                    # 调用PIL将图片读取为 JPEG，RGB 格式
+                    image = Image.open(temp_jpg_filename, formats=['PNG']).convert('RGB')
+                    ok = True
+                else:
+                    ok = False
             except Exception as e:
                 logger.exception(e)
             finally:
@@ -370,4 +367,4 @@ async def to_image(text) -> GraiaImage:
     img = await text_to_image(text=str(text))
     b = BytesIO()
     img.save(b, format="png")
-    return GraiaImage(data_bytes=b.getvalue())
+    return GraiaImage(text=text, data_bytes=b.getvalue())

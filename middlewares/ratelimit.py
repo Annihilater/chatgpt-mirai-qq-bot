@@ -1,8 +1,5 @@
 import time
-from typing import Union, Callable, Optional
-
-from graia.ariadne.message import Source
-from graia.ariadne.model import Friend, Group
+from typing import Callable, Optional
 
 from constants import config
 from conversation import ConversationContext
@@ -18,7 +15,9 @@ class MiddlewareRatelimit(Middleware):
 
     async def handle_request(self, session_id: str, prompt: str, respond: Callable,
                              conversation_context: Optional[ConversationContext], action: Callable):
-        rate_usage = manager.check_exceed('好友' if session_id.startswith("friend-") else '群组', session_id.split('-', 1)[1])
+        _id = session_id.split('-', 1)[1] if '-' in session_id and not session_id.startswith('-') and not session_id.endswith('-') else session_id
+        key = '好友' if session_id.startswith("friend-") else '群组'
+        rate_usage = manager.check_exceed(key, _id)
         if rate_usage >= 1:
             await respond(config.ratelimit.exceed)
             return
@@ -26,7 +25,7 @@ class MiddlewareRatelimit(Middleware):
 
     async def handle_respond_completed(self, session_id: str, prompt: str, respond: Callable):
         key = '好友' if session_id.startswith("friend-") else '群组'
-        msg_id = session_id.split('-', 1)[1]
+        msg_id = session_id.split('-', 1)[1] if '-' in session_id and not session_id.startswith('-') and not session_id.endswith('-') else session_id
         manager.increment_usage(key, msg_id)
         rate_usage = manager.check_exceed(key, msg_id)
         if rate_usage >= config.ratelimit.warning_rate:

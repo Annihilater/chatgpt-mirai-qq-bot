@@ -2,13 +2,14 @@ import ctypes
 from typing import Generator
 
 from adapter.botservice import BotAdapter
+import json
+from urllib.parse import quote
+from exceptions import BotOperationNotSupportedException
 from config import BardCookiePath
 from constants import botManager
-from exceptions import BotOperationNotSupportedException
 from loguru import logger
-import json
 import httpx
-from urllib.parse import quote
+
 
 hashu = lambda word: ctypes.c_uint64(hash(word)).value
 
@@ -28,13 +29,17 @@ class BardAdapter(BotAdapter):
         self.headers = {
             "Cookie": self.account.cookie_content,
             'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'zh-CN,zh;q=0.9',
         }
 
     async def get_at_token(self):
+        
         response = await self.client.get(
-            "https://bard.google.com/",
+            "https://bard.google.com/?hl=en",
             timeout=30,
             headers=self.headers,
+            follow_redirects=True,
         )
         self.at = quote(response.text.split('"SNlM0e":"')[1].split('","')[0])
 
@@ -71,17 +76,20 @@ class BardAdapter(BotAdapter):
             for lines in res:
                 if "wrb.fr" in lines:
                     data = json.loads(json.loads(lines)[0][2])
-                    result = data[0][0]
+                    result = data[4][0][1][0]
                     self.bard_session_id = data[1][0]
-                    self.r = data[1][1] # 用于下一次请求, 这个位置是固定的
+                    self.r = data[1][1]  # 用于下一次请求, 这个位置是固定的
                     # self.rc = data[4][1][0]
                     for check in data:
                         if not check:
                             continue
-                        for element in [element for row in check for element in row]:
-                            if "rc_" in element:
-                                self.rc = element
-                                break
+                        try:
+                            for element in [element for row in check for element in row]:
+                                if "rc_" in element:
+                                    self.rc = element
+                                    break
+                        except:
+                            continue
                     logger.debug(f"[Bard] {self.bard_session_id} - {self.r} - {self.rc} - {result}")
                     yield result
                     break

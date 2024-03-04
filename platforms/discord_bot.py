@@ -1,26 +1,24 @@
 import os
 import sys
+from io import BytesIO
 
-import datetime
 import discord
 from discord.ext import commands
-
 from graia.ariadne.message.chain import MessageChain
 from graia.ariadne.message.element import Image, Plain, Voice
-from loguru import logger
 
 from universal import handle_message
-from io import BytesIO, IOBase
 
 sys.path.append(os.getcwd())
 
-from constants import config, botManager
+from constants import config, BotPlatform
 
 intents = discord.Intents.default()
 intents.typing = False
 intents.presences = False
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+
 
 async def on_message_event(message: discord.Message) -> None:
     if message.author == bot.user:
@@ -50,7 +48,7 @@ async def on_message_event(message: discord.Message) -> None:
                 if isinstance(elem, Image):
                     await message.reply(file=discord.File(BytesIO(await elem.get_bytes()), filename='image.png'))
                 if isinstance(elem, Voice):
-                    await message.reply(file=discord.File(await elem.get_bytes(), filename="voice.wav"))
+                    await message.reply(file=discord.File(BytesIO(await elem.get_bytes()), filename="voice.wav"))
             return
         if isinstance(msg, str):
             chunks = [str(msg)[i:i + 1500] for i in range(0, len(str(msg)), 1500)]
@@ -60,20 +58,13 @@ async def on_message_event(message: discord.Message) -> None:
         if isinstance(msg, Image):
             return await message.reply(file=discord.File(BytesIO(await msg.get_bytes()), filename='image.png'))
         if isinstance(msg, Voice):
-            await message.reply(file=discord.File(await msg.get_bytes(), filename="voice.wav"))
+            await message.reply(file=discord.File(BytesIO(await msg.get_bytes()), filename="voice.wav"))
             return
 
     await handle_message(response,
                          f"{'friend' if isinstance(message.channel, discord.DMChannel) else 'group'}-{message.channel.id}",
                          message.content.replace(f"<@{bot_id}>", "").strip(), is_manager=False,
-                         nickname=message.author.name)
-
-
-@bot.event
-async def on_ready():
-    await botManager.login()
-    logger.info(f"Bot is ready. Logged in as {bot.user.name}-{bot.user.id}")
-
+                         nickname=message.author.name, request_from=BotPlatform.DiscordBot)
 
 @bot.event
 async def on_message(message):
@@ -81,5 +72,8 @@ async def on_message(message):
     await on_message_event(message)
 
 
-def main():
-    bot.run(config.discord.bot_token)
+async def start_task():
+    """|coro|
+    以异步方式启动
+    """
+    return await bot.start(config.discord.bot_token)
